@@ -2,17 +2,18 @@
 
 // Stake Legends
 
-pragma solidity ^0.5.0;
+pragma solidity ^0.6.0;
 pragma experimental ABIEncoderV2;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/upgrades/contracts/Initializable.sol";
 import "@openzeppelin/contracts/math/SafeMath.sol";
+import "@openzeppelin/contracts/utils/EnumerableSet.sol";
 
-import "../aave-protocol/contracts/interfaces/ILendingPoolAddressesProvider.sol";
-import "../aave-protocol/contracts/lendingpool/LendingPool.sol";
-import "../aave-protocol/contracts/lendingpool/LendingPoolCore.sol";
-import "../aave-protocol/contracts/tokenization/AToken.sol";
+import "./aave/ILendingPoolAddressesProvider.sol";
+import "./aave/ILendingPool.sol";
+import "./aave/ILendingPoolCore.sol";
+import "./aave/IAToken.sol";
 
 import "@chainlink/contracts/src/v0.6/ChainlinkClient.sol";
 
@@ -29,7 +30,7 @@ contract SeasonStaking is Ownable, Initializable, ChainlinkClient {
 
     uint256 internal constant N_WINNERS = 5;
 
-    EnumerableSet.AddressSet public participants;
+    EnumerableSet.AddressSet private participants;
     mapping (address => bool) public hasRedeemed;
 
     uint256 public estimatedStartTimestamp;
@@ -42,8 +43,8 @@ contract SeasonStaking is Ownable, Initializable, ChainlinkClient {
 
     ILendingPoolAddressesProvider private _aaveAddressesProvider;
     address private _chainlinkOracle;
-    string private _getUintJobId;
-    string private _getBoolJobId;
+    bytes32 private _getUintJobId;
+    bytes32 private _getBoolJobId;
     uint256 internal constant CHAINLINK_FEE = 0.1 * 10 ** 18; // 0.1 LINK
 
     struct IdentityRequest {
@@ -53,26 +54,26 @@ contract SeasonStaking is Ownable, Initializable, ChainlinkClient {
     mapping (bytes32 => IdentityRequest) private _identityRequests;
     mapping (bytes32 => address) private _redeemRequests;
     mapping (address => string) public usernameByAddress;
-    mapping (address => string) public addressByUsername;
+    mapping (string => address) public addressByUsername;
 
     /* Modifiers */
 
     modifier whenRegistering {
-        require(state == Registering, "The season is not in the registration phase");
+        require(state == State.Registering, "The season is not in the registration phase");
         _;
     }
 
     modifier whenStarted {
-        require(state == Started, "The season has not started yet");
+        require(state == State.Started, "The season has not started yet");
         _;
     }
 
     modifier whenEnded {
-        require(state == Ended, "The season is still running");
+        require(state == State.Ended, "The season is still running");
         _;
     }
 
-    function checkIdentityStatus(address _address, string _username) internal {
+    function checkIdentityStatus(address _address, string memory _username) internal {
         require(bytes(usernameByAddress[_address]).length == 0, "User already has a username");
         require(addressByUsername[_username] == address(0), "Username already has an owner");
     }
@@ -85,32 +86,32 @@ contract SeasonStaking is Ownable, Initializable, ChainlinkClient {
     /* Initializer */
 
     function initialize(address aaveLendingPoolAddressesProviderAddress, address chainlinkOracle, bytes32 getUintJobId, bytes32 getBoolJobId) public initializer {
-        _aaveAddressesProvider = new ILendingPoolAddressesProvider(aaveLendingPoolAddressesProviderAddress);
+        _aaveAddressesProvider = ILendingPoolAddressesProvider(aaveLendingPoolAddressesProviderAddress);
 
         _chainlinkOracle = chainlinkOracle;
         _getUintJobId = getUintJobId;
         _getBoolJobId = getBoolJobId;
 
-        state = Ended;
+        state = State.Ended;
     }
 
     /* Owner */
 
     function openRegistration(uint256 _estimatedStartTimestamp) external onlyOwner whenEnded {
-        state = Registering;
+        state = State.Registering;
         estimatedStartTimestamp = _estimatedStartTimestamp;
     }
 
-    function startSeason(uin256 _estimatedEndTimestamp) external onlyOwner whenRegistering {
-        state = Started;
+    function startSeason(uint256 _estimatedEndTimestamp) external onlyOwner whenRegistering {
+        state = State.Started;
         estimatedEndTimestamp = _estimatedEndTimestamp;
         initialContractBalance = address(this).balance; // Save contract balance for future reference
-        getLendingPool().deposit{ value: address(this).balance }(AAVE_ETH_ADDRESS, msg.value, 0); // Deposit contract ETH balance on Aave
+        getLendingPool().deposit{ value: address(this).balance }(AAVE_ETH_ADDRESS, address(this).balance, 0); // Deposit contract ETH balance on Aave
     }
 
     function endSeason() external onlyOwner whenStarted {
-        state = Ended;
-        getAETHToken().redeem(-1); // Redeem all initial ETH + interests
+        state = State.Ended;
+        getAETHToken().redeem(uint256(-1)); // Redeem all initial ETH + interests
     }
 
     /* Public */
@@ -123,7 +124,7 @@ contract SeasonStaking is Ownable, Initializable, ChainlinkClient {
         hasRedeemed[msg.sender] = false;
     }
 
-    function claimUsername(string _username) public {
+    function claimUsername(string calldata _username) public {
         checkIdentityStatus(msg.sender, _username);
         bytes32 requestId = requestValidateUsername(msg.sender, _username);
         _identityRequests[requestId] = IdentityRequest(msg.sender, _username);
@@ -137,10 +138,10 @@ contract SeasonStaking is Ownable, Initializable, ChainlinkClient {
 
     /* Chainlink requests */
 
-    function requestValidateUsername(address _address, string _username) internal returns (bytes32) {
+    function requestValidateUsername(address _address, string calldata _username) internal returns (bytes32) {
         Chainlink.Request memory request = buildChainlinkRequest(_getBoolJobId, address(this), this.fulfillValidateUsername.selector);
         request.add("get", VALIDATION_URI);
-        request.add("queryParams", abi.encodePacked("address=", string(_address), "&username=", _username));
+        request.add("queryParams", string(abi.encodePacked("address=", _address, "&username=", _username)));
         request.add("path", "valid");
         return sendChainlinkRequestTo(_chainlinkOracle, request, CHAINLINK_FEE);
     }
@@ -148,7 +149,7 @@ contract SeasonStaking is Ownable, Initializable, ChainlinkClient {
     function requestRedeem(address _address) internal returns (bytes32) {
         Chainlink.Request memory request = buildChainlinkRequest(_getUintJobId, address(this), this.fulfillRedeem.selector);
         request.add("get", RANK_URI);
-        request.add("queryParams", abi.encodePacked("username=", string(_address)));
+        request.add("queryParams", string(abi.encodePacked("username=", _address)));
         request.add("path", "rank");
         return sendChainlinkRequestTo(_chainlinkOracle, request, CHAINLINK_FEE);
     }
@@ -156,8 +157,8 @@ contract SeasonStaking is Ownable, Initializable, ChainlinkClient {
     /* Chainlink callbacks */
 
     function fulfillValidateUsername(bytes32 _requestId, bool _valid) public recordChainlinkFulfillment(_requestId) {
-        IdentityRequest identityRequest = _identityRequests[_requestId];
-        string _username = identityRequest._username;
+        IdentityRequest storage identityRequest = _identityRequests[_requestId];
+        string storage _username = identityRequest._username;
         address _address = identityRequest._address;
         delete _identityRequests[_requestId];
 
@@ -176,37 +177,37 @@ contract SeasonStaking is Ownable, Initializable, ChainlinkClient {
 
         participants.remove(_address);
         hasRedeemed[_address] = true;
-        uint256 redeemableAmount = REGISTRATION_FEE.add(eligiblePrize(rank));
-        (bool success, ) = address(uint160(_address)).call.value(redeemableAmount)(); // Explicit conversion to payable
+        uint256 redeemableAmount = SafeMath.add(eligiblePrize(rank), REGISTRATION_FEE);
+        (bool success, ) = address(uint160(_address)).call.value(redeemableAmount)(""); // Explicit conversion to payable
         require(success, "Redeem failed");
     }
 
     /* Private */
 
-    function getLendingPool() returns (LendingPool) {
-        return LendingPool(_aaveAddressesProvider.getLendingPool());
+    function getLendingPool() private view returns (ILendingPool) {
+        return ILendingPool(_aaveAddressesProvider.getLendingPool());
     }
 
-    function getLendingPoolCore() returns (LendingPoolCore) {
-        return LendingPoolCore(_aaveAddressesProvider.getLendingPoolCore());
+    function getLendingPoolCore() private view returns (ILendingPoolCore) {
+        return ILendingPoolCore(_aaveAddressesProvider.getLendingPoolCore());
     }
 
-    function getAETHToken() returns (AToken) {
-        return AToken(getLendingPoolCore().getReserveATokenAddress(AAVE_ETH_ADDRESS));
+    function getAETHToken() private view returns (IAToken) {
+        return IAToken(getLendingPoolCore().getReserveATokenAddress(AAVE_ETH_ADDRESS));
     }
 
     /* Views */
 
-    function eligiblePrize(uint256 rank) external view returns (uint256) {
+    function eligiblePrize(uint256 rank) public view returns (uint256) {
         if (rank >= N_WINNERS) {
             return 0;
         } else {
-            return generatedInterests().div(N_WINNERS); // Interests equally distributed among top N players
+            return SafeMath.div(generatedInterests(), N_WINNERS); // Interests equally distributed among top N players
         }
     }
 
-    function generatedInterests() external view returns (uint256) {
-        return getAETHToken().balanceOf(address(this)).sub(initialContractBalance);
+    function generatedInterests() public view returns (uint256) {
+        return SafeMath.sub(getAETHToken().balanceOf(address(this)), initialContractBalance);
     }
 
 }
