@@ -24,8 +24,8 @@ contract SeasonStaking is Ownable, Initializable, ChainlinkClient {
     uint256 internal constant REGISTRATION_FEE = 1 ether;
     address internal constant AAVE_ETH_ADDRESS = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
 
-    string internal constant VALIDATION_URI = "https://localhost:3000/validate";
-    string internal constant RANK_URI = "https://localhost:3000/rank";
+    string internal constant VALIDATION_URI = "https://api.stakelegends.uly.dev/validate";
+    string internal constant RANK_URI = "https://api.stakelegends.uly.dev/rank";
 
     uint256 internal constant N_WINNERS = 5;
 
